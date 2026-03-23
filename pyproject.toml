@@ -3,4 +3,6 @@ name = "cs6620-finalproject"
 version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "mediapipe>=0.10.33",
+]
