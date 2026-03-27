@@ -52,6 +52,10 @@ def calc_angle_3d(a,b,c):
     length_bc = np.linalg.norm(bc)
 
     cosine_angle = np.dot(ba, bc) / (length_ba * length_bc)
+    bounded_angle = np.clip(cosine_angle, 0.0, 1.0)
+    radian_angle = np.arccos(bounded_angle)
+    degrees_angle = np.degrees(radian_angle)
+    return degrees_angle
 
 count_state_standing = "STANDING"
 
@@ -147,6 +151,17 @@ def main():
                 # TODO: Add other KC's here
 
                 draw_skeleton(output_image, landmarks)
+
+                # Knee angle warning
+                green = (0, 255, 0)
+                red = (0, 0, 255)
+                warning_angle = 100
+                if knee_angle is not None:
+                    color_knee = green if knee_angle < 100 else red
+                    origin = (30,50)
+                    display_knee_angle = int(knee_angle)
+                    cv2.putText(output_image, f"Knee Deg: {display_knee_angle}", origin,
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, color_knee, 2, cv2.LINE_AA)
 
             cv2.imshow("Output", output_image)
 
