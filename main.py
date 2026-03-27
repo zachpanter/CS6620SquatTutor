@@ -144,6 +144,14 @@ def main():
 
                 knee_angle = calc_angle_3d(l_waist_landmark, l_knee_landmark, l_ankle_landmark)
 
+                # TODO: Add other KC's here
+
+                draw_skeleton(output_image, landmarks)
+
+            cv2.imshow("Output", output_image)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
 if __name__ == '__main__':
     main()
