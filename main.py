@@ -93,9 +93,29 @@ def draw_skeleton(image, landmarks):
             landmark_y = int(landmark.y * h)
             cv2.circle(image, (landmark_x, landmark_y), radius, color, thickness)
 
+VIDEO_PATH = './anterior trim.mov'
+
 def main():
-    # TODO: Invocable code here
-    MODEL_PATH = 'pose_landmarker_full.task'
+    BaseOptions = mp.tasks.BaseOptions
+    MODEL_PATH = './pose_landmarker_full.task'
+
+    PoseLandmarker = mp.tasks.vision.PoseLandmarker
+    VisionRunningMode = mp.tasks.vision.RunningMode
+    PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=VisionRunningMode.VIDEO
+    )
+
+    # TODO: Switch from video to live-stream based on progress
+
+
+    with PoseLandmarker.create_from_options(PoseLandmarkerOptions) as landmarker:
+        cap = cv2.VideoCapture(VIDEO_PATH)
+
+        while cap.isOpened():
+            success, frame = cap.read()
+            if not success:
+                break
 
 if __name__ == '__main__':
     main()
