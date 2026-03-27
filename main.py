@@ -3,6 +3,26 @@ import mediapipe as mp
 import numpy as np
 import time
 
+# LEFT (Sagittal View)
+# 11 Left Shoulder
+left_shoulder = 11
+# 23 Left Waist
+left_waist = 23
+# 25 Left Knee
+left_knee = 25
+# 27 Left Ankle
+left_ankle = 27
+
+# RIGHT
+# 12 Right Shoulder
+right_shoulder = 12
+# 24 Right Waist
+right_waist = 24
+# 26 Right Knee
+right_knee = 26
+# 28 Right Ankle
+right_ankle = 28
+
 def calc_angle_2d(a,b,c):
     angle_ba = np.array([a.x - b.x, a.y - b.y])
     angle_bc = np.array([c.x - b.x, c.y - b.y])
@@ -37,26 +57,6 @@ count_state_standing = "STANDING"
 
 def draw_skeleton(image, landmarks):
     h,w, _ = image.shape
-
-    # LEFT (Sagittal View)
-    # 11 Left Shoulder
-    left_shoulder = 11
-    # 23 Left Waist
-    left_waist = 23
-    # 25 Left Knee
-    left_knee = 25
-    # 27 Left Ankle
-    left_ankle = 27
-
-    # RIGHT
-    # 12 Right Shoulder
-    right_shoulder = 12
-    # 24 Right Waist
-    right_waist = 24
-    # 26 Right Knee
-    right_knee = 26
-    # 28 Right Ankle
-    right_ankle = 28
 
     shoulders = (left_shoulder, right_shoulder)
     hips = (left_waist, right_waist)
@@ -108,7 +108,6 @@ def main():
 
     # TODO: Switch from video to live-stream based on progress
 
-
     with PoseLandmarker.create_from_options(PoseLandmarkerOptions) as landmarker:
         cap = cv2.VideoCapture(VIDEO_PATH)
 
@@ -116,6 +115,35 @@ def main():
             success, frame = cap.read()
             if not success:
                 break
+
+            # Get timestamp
+            frame_timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+
+            # OpenCV to MP
+            cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
+
+            # Landmarks
+            detection_result = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
+
+            # Output rendering
+            output_image = frame.copy()
+
+            # Draw skeleton if joints are found
+            if detection_result.pose_landmarks:
+                # Find the first person, if multiple people are detected
+                landmarks = detection_result.pose_landmarks[0]
+
+
+                # TODO: Is there a way to detect what angle or side the script is looking at?
+
+                l_shoulder_landmark = landmarks[left_shoulder]
+                l_waist_landmark = landmarks[left_waist]
+                l_knee_landmark = landmarks[left_knee]
+                l_ankle_landmark = landmarks[left_ankle]
+
+                knee_angle = calc_angle_3d(l_waist_landmark, l_knee_landmark, l_ankle_landmark)
+
 
 if __name__ == '__main__':
     main()
