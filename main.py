@@ -92,3 +92,10 @@ def draw_skeleton(image, landmarks):
             landmark_x = int(landmark.x * w)
             landmark_y = int(landmark.y * h)
             cv2.circle(image, (landmark_x, landmark_y), radius, color, thickness)
+
+def main():
+    # TODO: Invocable code here
+    MODEL_PATH = 'pose_landmarker_full.task'
+
+if __name__ == '__main__':
+    main()
