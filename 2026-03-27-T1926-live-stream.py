@@ -22,8 +22,13 @@ def calc_angle_2d(a, b, c):
     angle_bc = np.array([c.x - b.x, c.y - b.y])
     length_ba = np.linalg.norm(angle_ba)
     length_bc = np.linalg.norm(angle_bc)
+
+    # Handle edge case where points perfectly overlap
+    if length_ba == 0 or length_bc == 0:
+        return 0.0
+
     cosine_angle = np.dot(angle_ba, angle_bc) / (length_ba * length_bc)
-    bounded_angle = np.clip(cosine_angle, 0.0, 1.0)
+    bounded_angle = np.clip(cosine_angle, -1.0, 1.0)
     rads = np.arccos(bounded_angle)
     return np.degrees(rads)
 
@@ -33,10 +38,36 @@ def calc_angle_3d(a, b, c):
     ba, bc = a - b, c - b
     length_ba = np.linalg.norm(ba)
     length_bc = np.linalg.norm(bc)
+
+    if length_ba == 0 or length_bc == 0:
+        return 0.0
+
     cosine_angle = np.dot(ba, bc) / (length_ba * length_bc)
-    bounded_angle = np.clip(cosine_angle, 0.0, 1.0)
+    bounded_angle = np.clip(cosine_angle, -1.0, 1.0)
     radian_angle = np.arccos(bounded_angle)
     return np.degrees(radian_angle)
+
+
+def calc_vertical_angle(top, bottom):
+    # Calculates the angle of the torso relative to true vertical (gravity)
+    vec = np.array([top.x - bottom.x, top.y - bottom.y])
+    vert = np.array([0, -1])  # Vector pointing straight up
+
+    length_vec = np.linalg.norm(vec)
+    if length_vec == 0:
+        return 0.0
+
+    cosine_angle = np.dot(vec, vert) / (length_vec * np.linalg.norm(vert))
+    bounded_angle = np.clip(cosine_angle, -1.0, 1.0)
+    return np.degrees(np.arccos(bounded_angle))
+
+
+def check_visibility(landmarks, indices, threshold=0.6):
+    # Returns True only if ALL requested landmarks meet the confidence threshold
+    for idx in indices:
+        if landmarks[idx].visibility < threshold:
+            return False
+    return True
 
 
 def draw_skeleton(image, landmarks):
@@ -67,46 +98,63 @@ def draw_skeleton(image, landmarks):
 
 def main():
     BaseOptions = mp.tasks.BaseOptions
-    MODEL_PATH = './pose_landmarker_full.task'  # Ensure this file exists
+    MODEL_PATH = './pose_landmarker_full.task'
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
     VisionRunningMode = mp.tasks.vision.RunningMode
 
-    # 1. State Management for Synchronization
+    # State Management for Synchronization
     rendered_frames_queue = queue.Queue(maxsize=3)
     pending_frames = {}
 
-    # 2. Asynchronous Callback
+    # Asynchronous Callback
     def handle_result(result: mp.tasks.vision.PoseLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
-        # Retrieve the original frame using the exact timestamp
         if timestamp_ms not in pending_frames:
             return
         frame_to_draw = pending_frames.pop(timestamp_ms)
+        h, w, _ = frame_to_draw.shape
 
-        # Draw skeleton if joints are found
         if result.pose_landmarks:
             landmarks = result.pose_landmarks[0]
-
-            l_shoulder_landmark = landmarks[left_shoulder]
-            l_waist_landmark = landmarks[left_waist]
-            l_knee_landmark = landmarks[left_knee]
-            l_ankle_landmark = landmarks[left_ankle]
-
-            knee_angle = calc_angle_3d(l_waist_landmark, l_knee_landmark, l_ankle_landmark)
-
             draw_skeleton(frame_to_draw, landmarks)
 
-            green = (0, 255, 0)
-            red = (0, 0, 255)
-            if knee_angle is not None:
-                color_knee = green if knee_angle < 100 else red
-                cv2.putText(frame_to_draw, f"Knee Deg: {int(knee_angle)}", (30, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, color_knee, 2, cv2.LINE_AA)
+            # Accumulate readouts dynamically
+            metrics_to_display = []
 
-        # Push the rendered frame to the UI queue. If full, drop it to prevent visual lag.
+            # 1. Knee Angle (3D Sagittal) - Using Left Side
+            if check_visibility(landmarks, [left_waist, left_knee, left_ankle]):
+                knee_angle = calc_angle_3d(landmarks[left_waist], landmarks[left_knee], landmarks[left_ankle])
+                metrics_to_display.append(f"Knee Depth: {int(knee_angle)} deg")
+
+            # 2. Knee Valgus (2D Frontal Plane)
+            if check_visibility(landmarks, [left_waist, left_knee, left_ankle, right_waist, right_knee, right_ankle]):
+                # Calculates 2D angle of Hip->Knee->Ankle. Deviation indicates valgus/varus.
+                l_valgus = calc_angle_2d(landmarks[left_waist], landmarks[left_knee], landmarks[left_ankle])
+                r_valgus = calc_angle_2d(landmarks[right_waist], landmarks[right_knee], landmarks[right_ankle])
+                metrics_to_display.append(f"Valgus (L/R): {int(l_valgus)} / {int(r_valgus)}")
+
+            # 3. Back Slant (Torso vs Vertical)
+            if check_visibility(landmarks, [left_shoulder, left_waist]):
+                back_slant = calc_vertical_angle(landmarks[left_shoulder], landmarks[left_waist])
+                metrics_to_display.append(f"Back Lean: {int(back_slant)} deg")
+
+            # 4. Stance Width (Ankle-to-Ankle in pixels)
+            if check_visibility(landmarks, [left_ankle, right_ankle]):
+                l_ank = np.array([landmarks[left_ankle].x * w, landmarks[left_ankle].y * h])
+                r_ank = np.array([landmarks[right_ankle].x * w, landmarks[right_ankle].y * h])
+                stance_width = np.linalg.norm(l_ank - r_ank)
+                metrics_to_display.append(f"Stance Width: {int(stance_width)} px")
+
+            # Render text block
+            y_offset = 50
+            for text in metrics_to_display:
+                cv2.putText(frame_to_draw, text, (30, y_offset),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+                y_offset += 35
+
         if not rendered_frames_queue.full():
             rendered_frames_queue.put(frame_to_draw)
 
-    # 3. Configure for Live Stream
+    # Configure for Live Stream
     options = mp.tasks.vision.PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=MODEL_PATH),
         running_mode=VisionRunningMode.LIVE_STREAM,
@@ -114,10 +162,7 @@ def main():
     )
 
     with PoseLandmarker.create_from_options(options) as landmarker:
-        # Changed to 0 for default webcam, or replace with valid camera index
         cap = cv2.VideoCapture(0)
-
-        # Live stream requires monotonically increasing timestamps
         start_time = time.time()
 
         while cap.isOpened():
@@ -125,30 +170,23 @@ def main():
             if not success:
                 break
 
-            # Generate current timestamp in ms
             timestamp_ms = int((time.time() - start_time) * 1000)
-
-            # Save an unmodified copy of the frame to our buffer
             pending_frames[timestamp_ms] = frame.copy()
 
-            # Fix: Properly assign the converted RGB frame before passing to MediaPipe
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-            # Send to background thread for processing
             landmarker.detect_async(mp_image, timestamp_ms)
 
-            # Memory Management: Clear old frames from the buffer if they were skipped/dropped
+            # Memory cleanup
             keys_to_delete = [ts for ts in pending_frames.keys() if ts < timestamp_ms - 1000]
             for k in keys_to_delete:
                 del pending_frames[k]
 
-            # Try to grab a rendered frame from the queue to display
             try:
                 display_frame = rendered_frames_queue.get_nowait()
-                cv2.imshow("Output", display_frame)
+                cv2.imshow("Biomechanics Dashboard", display_frame)
             except queue.Empty:
-                # If inference is still working, pass and keep capturing new frames
                 pass
 
             if cv2.waitKey(1) & 0xFF == ord('q'):

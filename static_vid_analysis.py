@@ -169,4 +169,6 @@ def main():
                     break
 
 if __name__ == '__main__':
+    # TODO: Choose an outer component to work on
+
     main()
