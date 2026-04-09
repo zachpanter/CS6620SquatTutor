@@ -4,6 +4,11 @@ import numpy as np
 import time
 import queue
 
+# PPM
+left_ear = 7
+right_ear = 8
+KNOWN_EAR_DIST_CM = 20.0
+
 # LEFT (Sagittal View)
 left_shoulder = 11
 left_waist = 23
@@ -105,6 +110,8 @@ def main():
     # State Management for Synchronization
     rendered_frames_queue = queue.Queue(maxsize=3)
     pending_frames = {}
+
+
 
     # Asynchronous Callback
     def handle_result(result: mp.tasks.vision.PoseLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
