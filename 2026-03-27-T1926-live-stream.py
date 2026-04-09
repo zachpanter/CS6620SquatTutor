@@ -4,6 +4,9 @@ import numpy as np
 import time
 import queue
 import typer
+import json
+import os
+from datetime import datetime
 from rich.console import Console
 
 app = typer.Typer()
@@ -54,19 +57,27 @@ def draw_skeleton(image, landmarks):
     h, w, _ = image.shape
     connections = [
         (left_shoulder, right_shoulder), (left_waist, right_waist),
-        (right_shoulder, right_waist), (right_waist, right_knee), (right_knee, right_ankle)
+        (right_shoulder, right_waist), (left_shoulder, left_waist),
+        (right_waist, right_knee), (left_waist, left_knee),
+        (right_knee, right_ankle), (left_knee, left_ankle)
     ]
+    joints_to_draw = [
+        left_shoulder, right_shoulder, left_waist, right_waist,
+        left_knee, right_knee, left_ankle, right_ankle
+    ]
+    color, thickness, radius = (245, 117, 66), 5, 5
+
     for start_index, end_index in connections:
         start, end = landmarks[start_index], landmarks[end_index]
-        color, thickness, radius = (245, 117, 66), 5, 5
         cv2.line(image, (int(start.x * w), int(start.y * h)), (int(end.x * w), int(end.y * h)), color, thickness)
-        for joint in [right_shoulder, right_waist, right_knee, right_ankle]:
-            lm = landmarks[joint]
-            cv2.circle(image, (int(lm.x * w), int(lm.y * h)), radius, color, thickness)
+
+    for joint in joints_to_draw:
+        lm = landmarks[joint]
+        cv2.circle(image, (int(lm.x * w), int(lm.y * h)), radius, color, thickness)
 
 
 # --- TRACKING SESSION WRAPPER ---
-def run_tracking_session(focus_metric: str = "all") -> dict:
+def run_tracking_session(focus_metric: str) -> list:
     BaseOptions = mp.tasks.BaseOptions
     MODEL_PATH = './pose_landmarker_full.task'
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
@@ -75,8 +86,7 @@ def run_tracking_session(focus_metric: str = "all") -> dict:
     rendered_frames_queue = queue.Queue(maxsize=3)
     pending_frames = {}
 
-    # Session state
-    session_data = {"knee_depth": [], "valgus": [], "back_lean": []}
+    metric_data = []
     session_start = time.time()
     tracking_state = {"started": False}
 
@@ -88,59 +98,75 @@ def run_tracking_session(focus_metric: str = "all") -> dict:
         current_time = time.time()
         elapsed = current_time - session_start
 
+        # 1. ALWAYS draw the skeleton if visible, even during the countdown
         if result.pose_landmarks:
-            landmarks = result.pose_landmarks[0]
-            draw_skeleton(frame_to_draw, landmarks)
+            draw_skeleton(frame_to_draw, result.pose_landmarks[0])
 
-            # --- PHASE 1: COUNTDOWN GRACE PERIOD ---
-            if elapsed < 8.0:
-                countdown_val = int(8.0 - elapsed) + 1
-                text_size = cv2.getTextSize(f"{countdown_val}", cv2.FONT_HERSHEY_SIMPLEX, 5.0, 10)[0]
-                text_x = (w - text_size[0]) // 2
-                text_y = (h + text_size[1]) // 2
-                cv2.putText(frame_to_draw, f"{countdown_val}", (text_x, text_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 5.0, (0, 0, 255), 10, cv2.LINE_AA)
+        # 2. Handle the Timing Phases independently of the landmarks
+        if elapsed < 8.0:
+            # --- PHASE 1: COUNTDOWN ---
+            countdown_val = int(8.0 - elapsed) + 1
+            text_size = cv2.getTextSize(f"{countdown_val}", cv2.FONT_HERSHEY_SIMPLEX, 5.0, 10)[0]
+            text_x = (w - text_size[0]) // 2
+            text_y = (h + text_size[1]) // 2
+            cv2.putText(frame_to_draw, f"{countdown_val}", (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 5.0, (0, 0, 255), 10, cv2.LINE_AA)
 
-                label_size = cv2.getTextSize("GET INTO POSITION", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-                label_x = (w - label_size[0]) // 2
-                cv2.putText(frame_to_draw, "GET INTO POSITION", (label_x, text_y + 80),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
+            label_size = cv2.getTextSize("GET INTO POSITION", cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+            label_x = (w - label_size[0]) // 2
+            cv2.putText(frame_to_draw, "GET INTO POSITION", (label_x, text_y + 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
 
-            # --- PHASE 2: ACTIVE TRACKING ---
+            if focus_metric in ["valgus", "stance"]:
+                orientation_msg = "Recommendation: FACE THE CAMERA DIRECTLY"
             else:
-                if not tracking_state["started"]:
-                    # Trigger the terminal chime on the first active frame
-                    print('\a', end='', flush=True)
-                    tracking_state["started"] = True
+                orientation_msg = "Recommendation: FACE PERPENDICULAR (SIDE) TO CAMERA"
 
-                metrics_to_display = []
+            orient_size = cv2.getTextSize(orientation_msg, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+            orient_x = (w - orient_size[0]) // 2
+            cv2.putText(frame_to_draw, orientation_msg, (orient_x, text_y + 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
-                if focus_metric in ["all", "knee_depth"] and check_visibility(landmarks,
-                                                                              [left_waist, left_knee, left_ankle]):
-                    knee_angle = calc_angle_3d(landmarks[left_waist], landmarks[left_knee], landmarks[left_ankle])
-                    metrics_to_display.append(f"Knee Depth: {int(knee_angle)} deg")
-                    # Append tuple of (timestamp, value)
-                    session_data["knee_depth"].append((current_time, knee_angle))
+        else:
+            # --- PHASE 2: ACTIVE TRACKING ---
+            if not tracking_state["started"]:
+                print('\a', end='', flush=True)
+                tracking_state["started"] = True
 
-                if focus_metric in ["all", "valgus"] and check_visibility(landmarks, [left_waist, left_knee, left_ankle,
-                                                                                      right_waist, right_knee,
-                                                                                      right_ankle]):
+            # Only calculate and display text metrics if landmarks are currently visible
+            if result.pose_landmarks:
+                landmarks = result.pose_landmarks[0]
+                display_text = ""
+
+                if focus_metric == "knee_depth" and check_visibility(landmarks, [left_waist, left_knee, left_ankle]):
+                    val = calc_angle_3d(landmarks[left_waist], landmarks[left_knee], landmarks[left_ankle])
+                    display_text = f"Knee Depth: {int(val)} deg"
+                    metric_data.append((current_time, val))
+
+                elif focus_metric == "valgus" and check_visibility(landmarks,
+                                                                   [left_waist, left_knee, left_ankle, right_waist,
+                                                                    right_knee, right_ankle]):
                     l_valgus = calc_angle_2d(landmarks[left_waist], landmarks[left_knee], landmarks[left_ankle])
                     r_valgus = calc_angle_2d(landmarks[right_waist], landmarks[right_knee], landmarks[right_ankle])
-                    avg_valgus = (l_valgus + r_valgus) / 2
-                    metrics_to_display.append(f"Valgus (L/R): {int(l_valgus)} / {int(r_valgus)}")
-                    session_data["valgus"].append((current_time, avg_valgus))
+                    val = (l_valgus + r_valgus) / 2
+                    display_text = f"Avg Valgus: {int(val)} deg"
+                    metric_data.append((current_time, val))
 
-                if focus_metric in ["all", "back_lean"] and check_visibility(landmarks, [left_shoulder, left_waist]):
-                    back_slant = calc_vertical_angle(landmarks[left_shoulder], landmarks[left_waist])
-                    metrics_to_display.append(f"Back Lean: {int(back_slant)} deg")
-                    session_data["back_lean"].append((current_time, back_slant))
+                elif focus_metric == "back_lean" and check_visibility(landmarks, [left_shoulder, left_waist]):
+                    val = calc_vertical_angle(landmarks[left_shoulder], landmarks[left_waist])
+                    display_text = f"Back Lean: {int(val)} deg"
+                    metric_data.append((current_time, val))
 
-                y_offset = 50
-                for text in metrics_to_display:
-                    cv2.putText(frame_to_draw, text, (30, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
+                elif focus_metric == "stance" and check_visibility(landmarks, [left_ankle, right_ankle]):
+                    l_ank = np.array([landmarks[left_ankle].x * w, landmarks[left_ankle].y * h])
+                    r_ank = np.array([landmarks[right_ankle].x * w, landmarks[right_ankle].y * h])
+                    val = np.linalg.norm(l_ank - r_ank)
+                    display_text = f"Stance Width: {int(val)} px"
+                    metric_data.append((current_time, val))
+
+                if display_text:
+                    cv2.putText(frame_to_draw, display_text, (30, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2,
                                 cv2.LINE_AA)
-                    y_offset += 35
 
         if not rendered_frames_queue.full():
             rendered_frames_queue.put(frame_to_draw)
@@ -181,81 +207,104 @@ def run_tracking_session(focus_metric: str = "all") -> dict:
         cv2.destroyAllWindows()
         time.sleep(0.1)
 
-        # --- PHASE 3: END GRACE PERIOD DATA PURGE ---
-    end_time = time.time()
-    cutoff_time = end_time - 2.0
-
-    clean_data = {}
-    for metric, tuples in session_data.items():
-        # Keep only values recorded before the final 8 seconds, stripping the timestamp
-        clean_data[metric] = [val for ts, val in tuples if ts <= cutoff_time]
-
+        # --- PHASE 3: PURGE & RETURN ---
+    cutoff_time = time.time() - 8.0
+    clean_data = [val for ts, val in metric_data if ts <= cutoff_time]
     return clean_data
 
 
 # --- EVALUATION LOGIC ---
-def evaluate_performance(data: dict, experience: str) -> str:
-    """Returns the name of the metric that needs the most work."""
-    # Default fallback if no data was captured
-    if not any(data.values()):
-        return "knee_depth"
+def evaluate_metric(metric: str, data: list, experience: str) -> dict:
+    if not data:
+        return {"passed": False, "actual": "No Data", "target": "N/A", "raw_data": []}
 
-    # Grab the max deviations during the set
-    max_lean = max(data["back_lean"]) if data["back_lean"] else 0
-    min_knee = min(data["knee_depth"]) if data["knee_depth"] else 180
-    avg_valgus = sum(data["valgus"]) / len(data["valgus"]) if data["valgus"] else 180
+    clean_data = [float(x) for x in data]
+    result = {"raw_data": clean_data}
 
-    # Stricter tolerances for experienced lifters
-    lean_threshold = 35 if experience == "experienced" else 45
-    depth_threshold = 80 if experience == "experienced" else 90
+    if metric == "back_lean":
+        actual = max(clean_data)
+        target = 35 if experience == "experienced" else 45
+        result.update({"passed": bool(actual <= target), "actual": f"{int(actual)} deg", "target": f"<= {target} deg"})
 
-    if max_lean > lean_threshold:
-        return "back_lean"
-    elif min_knee > depth_threshold:
-        return "knee_depth"
-    elif avg_valgus < 170:  # Valgus deviation (straight leg is ~180)
-        return "valgus"
+    elif metric == "valgus":
+        actual = min(clean_data)
+        target = 130
+        result.update({"passed": bool(actual >= target), "actual": f"{int(actual)} deg", "target": f">= {target} deg"})
 
-    return "knee_depth"  # Default to depth if everything is perfect
+    elif metric == "knee_depth":
+        actual = min(clean_data)
+        target = 80 if experience == "experienced" else 90
+        result.update({"passed": bool(actual <= target), "actual": f"{int(actual)} deg", "target": f"<= {target} deg"})
+
+    elif metric == "stance":
+        actual = float(np.std(clean_data))
+        target = 10 if experience == "experienced" else 20
+        result.update({"passed": bool(actual <= target), "actual": f"{int(actual)} px variance",
+                       "target": f"<= {target} px variance"})
+
+    return result
+
+
+def save_results(log_data: dict):
+    filename = "biomechanics_log.json"
+    existing_data = []
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r") as f:
+                existing_data = json.load(f)
+        except json.JSONDecodeError:
+            pass
+
+    existing_data.append(log_data)
+    with open(filename, "w") as f:
+        json.dump(existing_data, f, indent=4)
+    console.print(f"[dim]Results saved to {filename}[/dim]")
 
 
 # --- TYPER CLI ---
 @app.command()
 def main():
-    console.print("[bold green]Starting Biomechanics Tracker[/bold green]")
+    console.print("Starting Sequential Biomechanics Tracker")
 
-    # 1. Ask experience level
-    experience = typer.prompt(
-        "Are you a [beginner] or [experienced] lifter?",
-        default="beginner"
-    ).lower()
+    experience = typer.prompt("Are you a [beginner] or [experienced] lifter?", default="beginner").lower()
+    sequence = ["back_lean", "valgus", "knee_depth", "stance"]
 
-    # 2. Ask to begin
-    typer.confirm(
-        "\nReady to begin the initial tracking session? (Press Enter to start, 'q' in the window to quit)",
-        abort=False
-    )
+    session_log = {
+        "timestamp": datetime.now().isoformat(),
+        "experience": experience,
+        "results": {}
+    }
 
-    # 3. Run Session 1
-    console.print("\n[blue]Running Initial Assessment...[/blue]")
-    session_data = run_tracking_session(focus_metric="all")
+    for metric in sequence:
+        display_name = metric.replace('_', ' ').title()
 
-    # 4. Evaluate
-    focus_target = evaluate_performance(session_data, experience)
-    console.print(f"\n[bold yellow]Evaluation Complete.[/bold yellow]")
-    console.print(
-        f"Based on the joint tracking, your target area for the next set is: [bold red]{focus_target.replace('_', ' ').title()}[/bold red]")
+        proceed = typer.confirm(
+            f"\nReady for: {display_name}? (Press Enter to start, 'q' in the window to quit)",
+            default=True
+        )
+        if not proceed:
+            console.print("Session aborted by user.")
+            break
 
-    # 5. Start Session 2
-    typer.confirm(
-        f"\nReady to begin the isolated set focusing purely on {focus_target}? (Press Enter to start)",
-        abort=False
-    )
+        console.print(f"Tracking {display_name}...")
+        data = run_tracking_session(focus_metric=metric)
 
-    console.print(f"\n[blue]Running Focused Assessment: {focus_target}...[/blue]")
-    run_tracking_session(focus_metric=focus_target)
+        eval_result = evaluate_metric(metric, data, experience)
+        session_log["results"][metric] = eval_result
 
-    console.print("\n[bold green]Session complete. Good work.[/bold green]")
+        console.print(f"Target: {eval_result['target']} | Actual: {eval_result['actual']}")
+
+        if not eval_result["passed"]:
+            console.print(f"\nWide deviation detected in {display_name}.")
+            console.print(
+                "Form breakdown compromises safety and reinforces poor movement patterns. Rest, recover, and try again later.")
+            save_results(session_log)
+            raise typer.Exit()
+
+        console.print(f"Passed {display_name}.")
+
+    console.print("\nAll metrics passed! Excellent session.")
+    save_results(session_log)
 
 
 if __name__ == "__main__":
