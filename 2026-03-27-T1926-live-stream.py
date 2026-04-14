@@ -12,18 +12,18 @@ from rich.console import Console
 app = typer.Typer()
 console = Console()
 
-SAFETY_FEEDBACK = {
-    "back_lean": "[bold cyan]Biomechanics Summary:[/bold cyan] Maintain a neutral spine. Excessive forward lean drastically increases dangerous shear forces on the lumbar discs.",
-    "valgus": "[bold cyan]Biomechanics Summary:[/bold cyan] Keep knees tracking in line with your toes. Inward knee collapse causes uneven tracking and wear on the patellofemoral joint.",
-    "knee_depth": "[bold cyan]Biomechanics Summary:[/bold cyan] Deep squats are safe. Stopping exactly at 90° actually causes peak knee compression. Squatting deeper safely distributes the load, provided your mobility allows it without your lower back rounding.",
-    "stance": "[bold cyan]Biomechanics Summary:[/bold cyan] Root your feet to the floor. Shifting under load destroys your base of support. Your optimal stance width is strictly dictated by your unique hip anatomy and femur length, not a universal standard."
-}
-
 # --- CONSTANTS ---
 left_ear, right_ear = 7, 8
 KNOWN_EAR_DIST_CM = 20.0  # Average adult bi-tragial width
 left_shoulder, left_waist, left_knee, left_ankle = 11, 23, 25, 27
 right_shoulder, right_waist, right_knee, right_ankle = 12, 24, 26, 28
+
+SAFETY_FEEDBACK = {
+    "back_lean": "Biomechanics Summary: Maintain a neutral spine. Excessive forward lean drastically increases dangerous shear forces on the lumbar discs.",
+    "valgus": "Biomechanics Summary: Keep knees tracking in line with your toes. Inward knee collapse causes uneven tracking and wear on the patellofemoral joint.",
+    "knee_depth": "Biomechanics Summary: Deep squats are safe. Stopping exactly at 90 deg causes peak knee compression. Squat deeper to distribute load safely.",
+    "stance": "Biomechanics Summary: Root your feet. Shifting under load destroys your base of support. Optimal stance is dictated by your unique hip anatomy."
+}
 
 
 # --- MATH & GEOMETRY FUNCTIONS ---
@@ -64,7 +64,7 @@ def check_visibility(landmarks, indices, threshold=0.6):
 def draw_skeleton(image, landmarks):
     h, w, _ = image.shape
     connections = [
-        (left_ear, right_ear),  # Ear reference line
+        (left_ear, right_ear),
         (left_shoulder, right_shoulder), (left_waist, right_waist),
         (right_shoulder, right_waist), (left_shoulder, left_waist),
         (right_waist, right_knee), (left_waist, left_knee),
@@ -87,7 +87,7 @@ def draw_skeleton(image, landmarks):
 
 
 # --- TRACKING SESSION WRAPPER ---
-def run_tracking_session(focus_metric: str) -> list | str:
+def run_tracking_session(focus_metric: str, experience: str) -> list | str:
     BaseOptions = mp.tasks.BaseOptions
     MODEL_PATH = './pose_landmarker_full.task'
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
@@ -100,7 +100,12 @@ def run_tracking_session(focus_metric: str) -> list | str:
     session_start = time.time()
     tracking_state = {"started": False}
 
+    # State variable for stance tracking
+    initial_stance_cm = None
+
     def handle_result(result: mp.tasks.vision.PoseLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
+        nonlocal initial_stance_cm
+
         if timestamp_ms not in pending_frames: return
         frame_to_draw = pending_frames.pop(timestamp_ms)
         h, w, _ = frame_to_draw.shape
@@ -108,7 +113,6 @@ def run_tracking_session(focus_metric: str) -> list | str:
         current_time = time.time()
         elapsed = current_time - session_start
 
-        # Presentation-sized persistent overlay controls
         cv2.putText(frame_to_draw, "Controls: 'q' to finish set | 's' to skip", (20, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (200, 200, 200), 3, cv2.LINE_AA)
 
@@ -148,12 +152,20 @@ def run_tracking_session(focus_metric: str) -> list | str:
             if result.pose_landmarks:
                 landmarks = result.pose_landmarks[0]
                 display_text = ""
+                warning_cue = ""
 
+                # 1. KNEE DEPTH
                 if focus_metric == "knee_depth" and check_visibility(landmarks, [left_waist, left_knee, left_ankle]):
                     val = calc_angle_3d(landmarks[left_waist], landmarks[left_knee], landmarks[left_ankle])
                     display_text = f"Knee Depth: {int(val)} deg"
                     metric_data.append((current_time, val))
 
+                    target = 80 if experience == "experienced" else 90
+                    # Only show the cue if they are actively squatting (angle < 140) but haven't hit depth
+                    if 140 > val > target:
+                        warning_cue = "CUE: Pull your hips into the hole!"
+
+                # 2. VALGUS
                 elif focus_metric == "valgus" and check_visibility(landmarks,
                                                                    [left_waist, left_knee, left_ankle, right_waist,
                                                                     right_knee, right_ankle]):
@@ -163,22 +175,28 @@ def run_tracking_session(focus_metric: str) -> list | str:
                     display_text = f"Avg Valgus: {int(val)} deg"
                     metric_data.append((current_time, val))
 
+                    if val < 120:
+                        warning_cue = "CUE: Spread the floor apart!"
+
+                # 3. BACK LEAN
                 elif focus_metric == "back_lean" and check_visibility(landmarks, [left_shoulder, left_waist]):
                     val = calc_vertical_angle(landmarks[left_shoulder], landmarks[left_waist])
                     display_text = f"Back Lean: {int(val)} deg"
                     metric_data.append((current_time, val))
 
+                    target = 35 if experience == "experienced" else 45
+                    if val > target:
+                        warning_cue = "CUE: Show your shirt logo to the wall!"
+
+                # 4. STANCE
                 elif focus_metric == "stance" and check_visibility(landmarks,
                                                                    [left_ankle, right_ankle, left_ear, right_ear]):
-                    # 1. Establish Scale (PPM)
                     l_ear_pos = np.array([landmarks[left_ear].x * w, landmarks[left_ear].y * h])
                     r_ear_pos = np.array([landmarks[right_ear].x * w, landmarks[right_ear].y * h])
                     ear_dist_px = np.linalg.norm(l_ear_pos - r_ear_pos)
 
                     if ear_dist_px > 0:
                         ppm = ear_dist_px / KNOWN_EAR_DIST_CM
-
-                        # 2. Measure Stance in px, then convert to cm
                         l_ank_pos = np.array([landmarks[left_ankle].x * w, landmarks[left_ankle].y * h])
                         r_ank_pos = np.array([landmarks[right_ankle].x * w, landmarks[right_ankle].y * h])
                         stance_px = np.linalg.norm(l_ank_pos - r_ank_pos)
@@ -187,9 +205,19 @@ def run_tracking_session(focus_metric: str) -> list | str:
                         display_text = f"Stance Width: {int(val)} cm"
                         metric_data.append((current_time, val))
 
+                        if initial_stance_cm is None:
+                            initial_stance_cm = val
+
+                        target_var = 3.0 if experience == "experienced" else 5.0
+                        if abs(val - initial_stance_cm) > target_var:
+                            warning_cue = "CUE: Grab the floor with your toes!"
+
+                # Render Texts
                 if display_text:
-                    # Bumped up metric text size for the back of the class
                     cv2.putText(frame_to_draw, display_text, (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (0, 255, 0), 4,
+                                cv2.LINE_AA)
+                if warning_cue:
+                    cv2.putText(frame_to_draw, warning_cue, (30, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 4,
                                 cv2.LINE_AA)
 
         if not rendered_frames_queue.full():
@@ -222,9 +250,8 @@ def run_tracking_session(focus_metric: str) -> list | str:
 
             try:
                 display_frame = rendered_frames_queue.get_nowait()
-                # Use WINDOW_NORMAL so you can resize the window during the presentation
-                cv2.namedWindow(f"Biomechanics Dashboard", cv2.WINDOW_NORMAL)
-                cv2.imshow(f"Biomechanics Dashboard", display_frame)
+                cv2.namedWindow("Biomechanics Dashboard", cv2.WINDOW_NORMAL)
+                cv2.imshow("Biomechanics Dashboard", display_frame)
             except queue.Empty:
                 pass
 
@@ -263,7 +290,7 @@ def evaluate_metric(metric: str, data: list, experience: str) -> dict:
 
     elif metric == "valgus":
         actual = min(clean_data)
-        target = 99
+        target = 120
         result.update({"passed": bool(actual >= target), "actual": f"{int(actual)} deg", "target": f">= {target} deg"})
 
     elif metric == "knee_depth":
@@ -273,8 +300,6 @@ def evaluate_metric(metric: str, data: list, experience: str) -> dict:
 
     elif metric == "stance":
         actual = float(np.std(clean_data))
-        # Updated targets to reflect centimeters rather than raw pixels.
-        # A variance of < 3cm means the feet remained firmly planted.
         target = 3.0 if experience == "experienced" else 5.0
         result.update({"passed": bool(actual <= target), "actual": f"{actual:.1f} cm variance",
                        "target": f"<= {target:.1f} cm variance"})
@@ -324,7 +349,9 @@ def main():
             break
 
         console.print(f"Tracking {display_name}...")
-        data = run_tracking_session(focus_metric=metric)
+
+        # Pass the experience level so live cues can trigger appropriately
+        data = run_tracking_session(focus_metric=metric, experience=experience)
 
         if data == "skipped":
             console.print(f"Skipped {display_name}. Moving to next metric.")
@@ -336,6 +363,7 @@ def main():
 
         console.print(f"Target: {eval_result['target']} | Actual: {eval_result['actual']}")
 
+        # Output the educational safety summary
         console.print(f"\n{SAFETY_FEEDBACK[metric]}")
 
         if not eval_result["passed"]:
